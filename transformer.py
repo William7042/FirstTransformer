@@ -33,3 +33,15 @@ class Tokenizer:
         self.char_to_idx = {ch: i for i, ch in enumerate(self.chars)}
         self.idx_to_char = {i: ch for i, ch in enumerate(self.chars)}
 
+
+class Transformer(nn.Module):
+    def __init__(self,vocab_size=128, d_model=512, max_seq_len=1024):
+        super(Transformer, self).__init__()
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.position_embedding = nn.Embedding(max_seq_len, d_model)
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.d_model = d_model
+    
+    def layer(self):
+        x = self.token_embedding + self.position_embedding
+        normalized = self.layer_norm(x)
