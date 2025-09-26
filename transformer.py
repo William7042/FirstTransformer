@@ -33,19 +33,17 @@ class Tokenizer:
         self.char_to_idx = {ch: i for i, ch in enumerate(self.chars)}
         self.idx_to_char = {i: ch for i, ch in enumerate(self.chars)}
 
-
-class Transformer(nn.Module):
-    def __init__(self,vocab_size=128, d_model=512, max_seq_len=1024, token_ids=None, n_heads=8):
-        super(Transformer, self).__init__()
-        self.token_embedding = nn.Embedding(vocab_size, d_model)
-        self.position_embedding = nn.Embedding(max_seq_len, d_model)
-        self.layer_norm = nn.LayerNorm(d_model)
+class TransformerLayer(nn.Module):
+    def __init__(self, d_model=512, n_heads = 8):
+        super(TransformerLayer, self).__init__()
         self.d_model = d_model
-        self.token_ids = token_ids
         self.n_heads = n_heads
+
         self.head_dim = d_model // n_heads 
-        self.layer_norm_2 = nn.LayerNorm(d_model)
-        #weight matrixes
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.layer_norm2 = nn.LayerNorm(d_model)
+
+        #weight matrices
         self.W_q = nn.Linear(d_model, d_model) #query
         self.W_k = nn.Linear(d_model, d_model) #key
         self.W_v = nn.Linear(d_model, d_model) #value
@@ -53,18 +51,13 @@ class Transformer(nn.Module):
 
         self.ffn = nn.Sequential(
             nn.Linear(d_model, 4 * d_model),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4 * d_model, d_model)
         )
-
-
-    def forward(self,token_ids):
+    
+    def forward(self, x):
         #embedding
-        batch_size, seq_len = token_ids.shape
-        token_embeds = self.token_embedding(token_ids) 
-        positions = torch.arange(seq_len, device=token_ids.device)
-        position_embeds = self.position_embedding(positions)
-        x = token_embeds + position_embeds
+        batch_size, seq_len, _ = x.shape
         normalized = self.layer_norm(x)
 
         #multihead attention matrices
@@ -72,7 +65,7 @@ class Transformer(nn.Module):
         K = self.W_k(normalized)
         V = self.W_v(normalized)
 
-        #reshape them into 9 heads
+        #reshape them into 8 heads
         Q = Q.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
         K = K.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
         V = V.view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
@@ -81,14 +74,49 @@ class Transformer(nn.Module):
         scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.head_dim)
 
         #attention function is softmax(casualMask(scores))* V
-        casual_mask = torch.tril(torch.ones((seq_len, seq_len), device=token_ids.device))
+        casual_mask = torch.tril(torch.ones((seq_len, seq_len), device=x.device))
         scores = scores.masked_fill(casual_mask == 0, float('-inf'))
         attention_weights = torch.softmax(scores, dim=-1)
         attended_values = torch.matmul(attention_weights, V)
 
         #concatenate heads
         attended_values = attended_values.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
-        output = self.W_o(attended_values) + x
+        attention_output = self.W_o(attended_values) + x
+        
+        #ok now we run it through a feedforward network
+        normalized_attention = self.layer_norm2(attention_output)
+        ffn_output = self.ffn(normalized_attention)
+        layer_output = ffn_output + attention_output
+        return layer_output
+
+
+class Transformer(nn.Module):
+    def __init__(self,vocab_size=128, d_model=512, max_seq_len=1024, token_ids=None, n_heads=8,n_layers=6):
+        super(Transformer, self).__init__()
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.position_embedding = nn.Embedding(max_seq_len, d_model)
+        self.d_model = d_model
+        self.token_ids = token_ids
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads 
+        self.final_layer_norm = nn.LayerNorm(d_model)
+
+        self.layers = nn.ModuleList([TransformerLayer(d_model, n_heads) for _ in range(n_layers)])
+
+        self.output_proj = nn.Linear(d_model, vocab_size)
+
+    def forward(self, token_ids):
+
+        batch_size, seq_len = token_ids.shape
+        token_embeds = self.token_embedding(token_ids) 
+        positions = torch.arange(seq_len, device=token_ids.device)
+        position_embeds = self.position_embedding(positions)
+        x = token_embeds + position_embeds
         
 
-        #ok now we run it through a feedforward network
+        for layer in self.layers:
+            x = layer(x)
+        
+        x = self.final_layer_norm(x)
+        logits = self.output_proj(x)
+        return logits
