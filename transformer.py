@@ -2,9 +2,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import torch.nn.functional as F
 
+if torch.backends.mps.is_available():
+    device = torch.device('mps')
+elif torch.cuda.is_available():
+    device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
 class Tokenizer:
     def __init__(self, text=None):
+        
         if text is not None:
             self.chars = sorted(list(set(text)))
         else:
@@ -120,3 +128,158 @@ class Transformer(nn.Module):
         x = self.final_layer_norm(x)
         logits = self.output_proj(x)
         return logits
+
+
+def train(model, tokenizer, text_data, epochs=100, batch_size=32, seq_len=128, save_path=None):
+    optimizer = optim.Adam(model.parameters(), lr=3e-4)
+    vocab_size = tokenizer.vocab_size
+    i=0
+    for epoch in range(epochs):
+        print(i)
+        i+=1
+        total_loss = 0
+        batch_count = 0
+        
+        for batch in get_batches(text_data, tokenizer, batch_size, seq_len):
+            logits = model(batch)
+            targets = batch[:, 1:]
+            logits = logits[:, :-1]
+            
+            loss = F.cross_entropy(
+                logits.reshape(-1, vocab_size), 
+                targets.reshape(-1)              
+            )
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            batch_count += 1
+        
+        avg_loss = total_loss / batch_count
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+        
+
+        if save_path and (epoch + 1) % 10 == 0:
+            save_model(model, tokenizer, save_path)
+
+def generate(model, tokenizer, prompt="", max_tokens=100, temperature=1.0):
+    model.eval()
+    
+    #encode prompt
+    tokens = tokenizer.encode(prompt)
+    tokens = torch.tensor(tokens).unsqueeze(0)  #add batch dim
+    
+    for _ in range(max_tokens):
+        #get next token probabilities
+        logits = model(tokens)         
+        next_logits = logits[0, -1] / temperature #last position
+        
+        #sample next token
+        probs = F.softmax(next_logits, dim=-1)
+        next_token = torch.multinomial(probs, 1)
+
+        #append to sequence
+        tokens = torch.cat([tokens, next_token.unsqueeze(0)], dim=1)
+    
+    return tokenizer.decode(tokens[0].tolist())
+
+def get_batches(text_data, tokenizer, batch_size, seq_len, device=device):
+
+    tokens = tokenizer.encode(text_data)
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    
+    
+    num_sequences = len(tokens) - seq_len
+    
+    
+    for _ in range(num_sequences // batch_size):
+        batch = []
+        
+        for _ in range(batch_size):
+            #random starting position
+            start_idx = torch.randint(0, num_sequences, (1,)).item()
+            sequence = tokens[start_idx:start_idx + seq_len]
+            batch.append(sequence)
+        
+        #stack into batch tensor
+        batch_tensor = torch.stack(batch).to(device)
+        yield batch_tensor
+
+def save_model(model, tokenizer, optimizer, epoch, filepath):
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'epoch': epoch,
+        'vocab_size': tokenizer.vocab_size,
+        'chars': tokenizer.chars,
+        'char_to_idx': tokenizer.char_to_idx,
+        'idx_to_char': tokenizer.idx_to_char
+    }, filepath)
+
+def load_model(filepath, d_model=256, n_layers=4, n_heads=8, max_seq_len=512):
+    if torch.backends.mps.is_available():
+        checkpoint = torch.load(filepath, map_location='mps')
+    elif torch.cuda.is_available():
+        checkpoint = torch.load(filepath, map_location='cuda')
+    else:
+        checkpoint = torch.load(filepath, map_location='cpu')
+
+    #recreate tokenizer and model 
+    tokenizer = Tokenizer()
+    tokenizer.chars = checkpoint['chars']
+    tokenizer.vocab_size = checkpoint['vocab_size']
+    tokenizer.char_to_idx = checkpoint['char_to_idx']
+    tokenizer.idx_to_char = checkpoint['idx_to_char']
+    
+    model = Transformer(vocab_size=tokenizer.vocab_size, d_model=d_model, n_layers=n_layers, n_heads=n_heads, max_seq_len=max_seq_len)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    #return training state info
+    return model, tokenizer, checkpoint.get('epoch', 0), checkpoint.get('optimizer_state_dict')
+
+def main():
+    model_path = "beemovie_model.pth"
+    text_file = "shakespeare.txt"
+    
+
+    d_model = 256
+    n_layers = 4
+    n_heads = 8
+    max_seq_len = 512
+    
+    #check if saved model exists
+    if os.path.exists(model_path):
+        print("Found existing model, loading...")
+        model, tokenizer, epoch, optimizer_state = load_model(model_path, d_model, n_layers, n_heads, max_seq_len)
+        model.to(device)
+    else:
+        print("No existing model found, training new one...")
+        
+        #load text data
+        with open(text_file, 'r', encoding='utf-8') as f:
+            text_data = f.read()
+        
+        tokenizer = Tokenizer(text_data)
+        model = Transformer(
+            vocab_size=tokenizer.vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            max_seq_len=max_seq_len
+        ).to(device)
+        
+        #train the model
+        train(model, tokenizer, text_data, epochs=50, batch_size=16, seq_len=64, save_path=model_path)
+    
+
+    model.eval()
+    #this is the prompt
+    prompt = "b"
+    output = generate(model, tokenizer, prompt=prompt, max_tokens=200)
+    print(f"\nGenerated text:\n{output}")
+
+if __name__ == "__main__":
+    import os
+    main()
